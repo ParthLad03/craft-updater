@@ -95,9 +95,8 @@ You'll need it again only to reinstall, change settings or uninstall.
 │          You have 0.6.1.                             │
 │                                                      │
 │          If you choose Update, the new version       │
-│          downloads, then DeckCraft closes (it asks   │
-│          you to save any changes first), updates,    │
-│          and opens again.                            │
+│          downloads while you keep working. Then you  │
+│          choose when to restart DeckCraft to use it. │
 │                                                      │
 │                              [ Cancel ]  [ Update ]  │
 └──────────────────────────────────────────────────────┘
@@ -118,12 +117,31 @@ The popup stays above the app's windows. **Return** chooses Update and **Esc** c
 You can keep working in the app while it downloads (most apps are 60–110 MB). Then the window shows
 **Checking the download…** for a few seconds.
 
-**3. The app restarts.** The app quits the normal way, so **it asks you to save** any unsaved
-work. Then the new version is put in place and the app opens again.
+**3. You choose when to restart.** Once the download has passed every check:
 
-- If you cancel the app's save prompt, nothing breaks: the update installs the next time you quit
-  the app, and the next open is the new version.
-- If you quit the app yourself during the download, the update installs and the app stays closed.
+```
+┌──────────────────────────────────────────────────────┐
+│  [icon]  DeckCraft v0.7.0 is ready                   │
+│                                                      │
+│          Restart DeckCraft to finish updating. It    │
+│          asks you to save any changes first, then    │
+│          opens again with the new version.           │
+│                                                      │
+│          If you choose Later, the update is          │
+│          installed when you quit DeckCraft, and the  │
+│          new version opens next time.                │
+│                                                      │
+│                         [ Later ]  [ Restart Now ]   │
+└──────────────────────────────────────────────────────┘
+```
+
+- **Restart Now:** the app quits the normal way, so **it asks you to save** any unsaved work.
+  The new version is put in place and the app opens again, already updated.
+- **Later:** keep working. The update is installed when you quit the app, and the next start is
+  the new version.
+- If you cancel the app's save prompt after **Restart Now**, it behaves like **Later**.
+- If you quit the app yourself during the download, the update is installed straight away and a
+  popup offers **Open DeckCraft** or **Close**.
 
 **You click Cancel.** Nothing is downloaded or changed, and you aren't asked again while the app
 stays open. You're asked again the next time you start the app.
@@ -206,6 +224,7 @@ Example log of a successful update:
 2026-10-16T08:19:30Z DeckCraft: downloading deckcraft-0.7.0-macos-universal.dmg
 2026-10-16T08:21:40Z DeckCraft: v0.7.0 verified and staged
 2026-10-16T08:21:44Z installed /Applications/DeckCraft.app (now 0.7.0)
+2026-10-16T08:21:45Z DeckCraft reopened (0.7.0, pid 41234)
 ```
 
 ---
@@ -248,7 +267,14 @@ network, so you'd have to start Craft apps more than once a minute for an hour t
         │                                 any check fails ─► error popup, exit
         ▼
  copy to /Applications/.DeckCraft.app.update
- quit DeckCraft (it asks to save) → swap in new version → reopen → exit
+        ▼
+ popup: Restart Now / Later
+        │ Restart Now                       │ Later
+        ▼                                   ▼
+ quit DeckCraft (it asks to save)     wait until you quit DeckCraft
+ → swap in new version → reopen       → swap in new version
+        ▼                                   ▼
+       exit                                exit
 ```
 
 - `install.sh` builds `craft-updater`, copies it to `~/Library/Application Support/CraftUpdater/`,
@@ -297,7 +323,7 @@ anywhere except the GitHub requests above.
 | Log: `release vX has no <name>-X-macos-universal.dmg` | That release has no macOS build (yet) | Nothing to do. It's picked up when a later release has one |
 | Popup: "can't write to /Applications" | Not an admin account, or the folder is protected | Put the app in `~/Applications` instead, then re-run `./install.sh` |
 | Popup: "signature invalid" or "not signed by Artcraft's team" | The download isn't a genuine Artcraft build | Don't install it by hand either. Check the release on GitHub |
-| App reopened without the document you had open | Expected after **Update** | Open the document again |
+| App reopened without the document you had open | Expected after **Restart Now** | Open the document again |
 | Nothing happens and the log says nothing | CraftUpdater isn't set up | `launchctl print gui/$(id -u)/local.craft-updater`; if it's not found, run `./install.sh` |
 
 ---
@@ -317,7 +343,7 @@ like.
 ## Known limits
 
 - **macOS only.**
-- After **Update**, the app reopens with no document. Reopen what you were working on.
+- After **Restart Now**, the app reopens with no document. Reopen what you were working on.
 - An app started from a terminal with `--version`, or with `WORDCRAFT_NO_PREFS` set, writes no
   log file, so no check happens. Opening from the Dock, Finder, Launchpad or Spotlight always works.
 - A "portable" copy of an app that keeps its data somewhere other than

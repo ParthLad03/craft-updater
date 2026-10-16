@@ -180,7 +180,8 @@ struct CraftApp {
     var name: String { (bundleID.dropFirst(bundlePrefix.count)).lowercased() }
     var displayName: String { url.deletingPathExtension().lastPathComponent }
     var version: String {
-        (Bundle(url: url)?.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "0.0.0"
+        let plist = url.appendingPathComponent("Contents/Info.plist")
+        return (NSDictionary(contentsOf: plist)?["CFBundleShortVersionString"] as? String) ?? "0.0.0"
     }
 }
 
@@ -399,8 +400,7 @@ final class Updater: NSObject {
               let app = craftApp(running),
               let pending = pendingOnQuit.removeValue(forKey: app.bundleID) else { return }
         queue.async {
-            do { try install(staged: pending.staged, over: pending.target) }
-            catch { log("\(app.displayName): install on quit failed: \(error)") }
+            _ = self.installLogged(app, staged: pending.staged)
             DispatchQueue.main.async { self.done(app) }
         }
     }
@@ -441,7 +441,7 @@ final class Updater: NSObject {
     private func ask(_ app: CraftApp, running: NSRunningApplication, release: Release) {
         let alert = NSAlert()
         alert.messageText = "An update to \(app.displayName) is available"
-        alert.informativeText = "Do you want to install \(app.displayName) \(release.tag)? You have \(app.version).\n\nIf you choose Update, the new version downloads, then \(app.displayName) closes (it asks you to save any changes first), updates, and opens again."
+        alert.informativeText = "Do you want to install \(app.displayName) \(release.tag)? You have \(app.version).\n\nIf you choose Update, the new version downloads while you keep working. Then you choose when to restart \(app.displayName) to use it."
         alert.icon = NSWorkspace.shared.icon(forFile: app.url.path)
         alert.addButton(withTitle: "Update")
         alert.addButton(withTitle: "Cancel")
@@ -465,8 +465,8 @@ final class Updater: NSObject {
                     DispatchQueue.main.async { window.update(text, fraction) }
                 }
                 DispatchQueue.main.async {
-                    window.update("Restarting \(app.displayName)…", nil)
-                    self.quitInstallReopen(app, running: running, staged: staged, window: window)
+                    window.close()
+                    self.offerRestart(app, running: running, release: release, staged: staged)
                 }
             } catch {
                 DispatchQueue.main.async {
@@ -493,49 +493,119 @@ final class Updater: NSObject {
         done(app)
     }
 
-    /// Quit normally (the app asks to save), install, reopen. If the user cancels the quit,
-    /// we stay until the app quits and install then.
-    private func quitInstallReopen(_ app: CraftApp, running: NSRunningApplication, staged: URL, window: ProgressWindow) {
+    /// The download is verified. Ask when to restart into the new version.
+    private func offerRestart(_ app: CraftApp, running: NSRunningApplication, release: Release, staged: URL) {
         if running.isTerminated {
-            // The user quit the app during the download: install, but don't reopen it.
-            window.close()
+            // The user quit the app during the download: install now, then offer to open it.
             queue.async {
-                do { try install(staged: staged, over: app.url) }
-                catch { log("\(app.displayName): install failed: \(error)") }
-                DispatchQueue.main.async { self.done(app) }
+                let ok = self.installLogged(app, staged: staged)
+                DispatchQueue.main.async {
+                    guard ok else { self.installFailed(app); return }
+                    let alert = NSAlert()
+                    alert.messageText = "\(app.displayName) has been updated to \(release.tag)"
+                    alert.informativeText = "Open \(app.displayName) now to use the new version?"
+                    alert.icon = NSWorkspace.shared.icon(forFile: app.url.path)
+                    alert.addButton(withTitle: "Open \(app.displayName)")
+                    alert.addButton(withTitle: "Close")
+                    NSApp.activate(ignoringOtherApps: true)
+                    alert.window.level = .floating
+                    if alert.runModal() == .alertFirstButtonReturn { self.reopen(app) } else { self.done(app) }
+                }
             }
             return
         }
-        // Hide our window so the app's own save prompt isn't covered.
-        window.close()
+
+        let alert = NSAlert()
+        alert.messageText = "\(app.displayName) \(release.tag) is ready"
+        alert.informativeText = "Restart \(app.displayName) to finish updating. It asks you to save any changes first, then opens again with the new version.\n\nIf you choose Later, the update is installed when you quit \(app.displayName), and the new version opens next time."
+        alert.icon = NSWorkspace.shared.icon(forFile: app.url.path)
+        alert.addButton(withTitle: "Restart Now")
+        alert.addButton(withTitle: "Later")
+        NSApp.activate(ignoringOtherApps: true)
+        alert.window.level = .floating
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            installOnQuit(app, running: running, staged: staged)
+            return
+        }
+        restart(app, running: running, staged: staged)
+    }
+
+    /// Quit normally (the app asks to save), install, reopen. If the user cancels the quit,
+    /// the update installs when the app does quit.
+    private func restart(_ app: CraftApp, running: NSRunningApplication, staged: URL) {
         running.terminate()
         queue.async {
             let deadline = Date().addingTimeInterval(300)
             while !running.isTerminated && Date() < deadline { Thread.sleep(forTimeInterval: 0.5) }
             guard running.isTerminated else {
-                log("\(app.displayName) didn't quit; update installs when it quits")
-                DispatchQueue.main.async {
-                    if running.isTerminated {
-                        self.queue.async {
-                            do { try install(staged: staged, over: app.url) }
-                            catch { log("\(app.displayName): install failed: \(error)") }
-                            DispatchQueue.main.async { self.done(app) }
-                        }
-                    } else {
-                        self.pendingOnQuit[app.bundleID] = (staged, app.url)
-                    }
-                }
+                log("\(app.displayName) didn't quit")
+                DispatchQueue.main.async { self.installOnQuit(app, running: running, staged: staged) }
                 return
             }
-            do {
-                try install(staged: staged, over: app.url)
-            } catch {
-                log("\(app.displayName): install failed: \(error)")
+            let ok = self.installLogged(app, staged: staged)
+            DispatchQueue.main.async { ok ? self.reopen(app) : self.installFailed(app) }
+        }
+    }
+
+    /// Main thread. Installs when the app quits (or right away if it already has).
+    private func installOnQuit(_ app: CraftApp, running: NSRunningApplication, staged: URL) {
+        if running.isTerminated {
+            queue.async {
+                _ = self.installLogged(app, staged: staged)
+                DispatchQueue.main.async { self.done(app) }
             }
+            return
+        }
+        log("\(app.displayName): update installs when it quits")
+        pendingOnQuit[app.bundleID] = (staged, app.url)
+    }
+
+    /// Runs on `queue`. Swaps the new version in; false (and the old app untouched) on failure.
+    private func installLogged(_ app: CraftApp, staged: URL) -> Bool {
+        do {
+            try install(staged: staged, over: app.url)
+            // Tell Launch Services about the new version before it's opened.
+            run("/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister",
+                ["-f", app.url.path])
+            return true
+        } catch {
+            log("\(app.displayName): install failed: \(error)")
+            try? FileManager.default.removeItem(at: staged)
+            return false
+        }
+    }
+
+    private func installFailed(_ app: CraftApp) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "\(app.displayName) couldn't be updated"
+        alert.informativeText = "The new version couldn't be put in place. Your current version is still installed. Details are in ~/Library/Logs/CraftUpdater.log."
+        NSApp.activate(ignoringOtherApps: true)
+        alert.runModal()
+        reopen(app)
+    }
+
+    /// Opens the (now updated) app and logs which version came up.
+    private func reopen(_ app: CraftApp) {
+        let config = NSWorkspace.OpenConfiguration()
+        config.activates = true
+        NSWorkspace.shared.openApplication(at: app.url, configuration: config) { opened, error in
             DispatchQueue.main.async {
-                NSWorkspace.shared.openApplication(at: app.url, configuration: NSWorkspace.OpenConfiguration()) { _, _ in
-                    DispatchQueue.main.async { self.done(app) }
+                if let error {
+                    log("\(app.displayName): reopen failed (\(error)); trying open(1)")
+                    let r = run("/usr/bin/open", [app.url.path])
+                    if r.status != 0 {
+                        log("\(app.displayName): open(1) failed: \(r.output)")
+                        let alert = NSAlert()
+                        alert.messageText = "\(app.displayName) was updated to \(app.version)"
+                        alert.informativeText = "It couldn't be opened automatically. Open it from Applications."
+                        NSApp.activate(ignoringOtherApps: true)
+                        alert.runModal()
+                    }
+                } else {
+                    log("\(app.displayName) reopened (\(app.version), pid \(opened?.processIdentifier ?? 0))")
                 }
+                self.done(app)
             }
         }
     }
